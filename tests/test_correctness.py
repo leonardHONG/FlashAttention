@@ -36,7 +36,7 @@ class TestBasicCorrectness:
     def test_no_mask(self, N, d):
         B, H = 2, 4
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=False)
+        out, _ = flash_attn_forward(Q, K, V, causal=False)
         ref = sdpa_attention(Q, K, V, is_causal=False)
         _check_close(out, ref, f"no_mask N={N} d={d}")
 
@@ -44,7 +44,7 @@ class TestBasicCorrectness:
     def test_vs_naive(self, N):
         B, H, d = 2, 4, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=False)
+        out, _ = flash_attn_forward(Q, K, V, causal=False)
         ref = naive_attention(Q, K, V)
         _check_close(out, ref, f"vs_naive N={N}")
 
@@ -59,7 +59,7 @@ class TestCausalMask:
     def test_causal(self, N, d):
         B, H = 2, 4
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=True)
+        out, _ = flash_attn_forward(Q, K, V, causal=True)
         ref = sdpa_attention(Q, K, V, is_causal=True)
         _check_close(out, ref, f"causal N={N} d={d}")
 
@@ -68,7 +68,7 @@ class TestCausalMask:
         B, H, d = 2, 4, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
         mask = make_causal_mask(N, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=True)
+        out, _ = flash_attn_forward(Q, K, V, causal=True)
         ref = naive_attention(Q, K, V, mask=mask)
         _check_close(out, ref, f"causal_vs_naive N={N}")
 
@@ -83,7 +83,7 @@ class TestPaddingMask:
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
         seqlens = [200, 150]
         seqlens_k = torch.tensor(seqlens, dtype=torch.int32, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
+        out, _ = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
         pad_mask = make_padding_mask(seqlens, N, device=DEVICE)
         ref = naive_attention(Q, K, V, mask=pad_mask)
         _check_close(out, ref, "padding_basic")
@@ -92,7 +92,7 @@ class TestPaddingMask:
         B, H, N, d = 2, 4, 128, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
         seqlens_k = torch.tensor([N, N], dtype=torch.int32, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
+        out, _ = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
         ref = naive_attention(Q, K, V)
         _check_close(out, ref, "padding_full_length")
 
@@ -105,7 +105,7 @@ class TestNumericalEdgeCases:
     def test_all_masked_row(self):
         B, H, N, d = 1, 1, 64, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=True)
+        out, _ = flash_attn_forward(Q, K, V, causal=True)
         ref = sdpa_attention(Q, K, V, is_causal=True)
         _check_close(out, ref, "all_masked_row")
 
@@ -114,7 +114,7 @@ class TestNumericalEdgeCases:
         B, H, N, d = 1, 2, 128, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
         Q = Q * 10.0
-        out = flash_attn_forward(Q, K, V, causal=False)
+        out, _ = flash_attn_forward(Q, K, V, causal=False)
         ref = naive_attention(Q, K, V)
         # 放大输入导致 FP16 累积误差增大，放宽至 atol=0.02
         out_f, ref_f = out.float(), ref.float()
@@ -125,7 +125,7 @@ class TestNumericalEdgeCases:
     def test_single_token(self):
         B, H, N, d = 2, 4, 1, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
-        out = flash_attn_forward(Q, K, V, causal=False)
+        out, _ = flash_attn_forward(Q, K, V, causal=False)
         ref = naive_attention(Q, K, V)
         _check_close(out, ref, "single_token")
 
@@ -150,7 +150,7 @@ class TestFP32Precision:
 
         # FP16 kernel
         Q16, K16, V16 = Q32.half(), K32.half(), V32.half()
-        out_f16 = flash_attn_forward(Q16, K16, V16, causal=False)
+        out_f16, _ = flash_attn_forward(Q16, K16, V16, causal=False)
 
         # 误差分析
         diff = (out_f16.float() - ref_f32).abs()
@@ -174,7 +174,7 @@ class TestFP32Precision:
         ref_f32 = naive_attention(Q32, K32, V32, mask=mask)
 
         Q16, K16, V16 = Q32.half(), K32.half(), V32.half()
-        out_f16 = flash_attn_forward(Q16, K16, V16, causal=True)
+        out_f16, _ = flash_attn_forward(Q16, K16, V16, causal=True)
 
         diff = (out_f16.float() - ref_f32).abs()
         max_diff = diff.max().item()
@@ -193,7 +193,7 @@ class TestEarlyExitStatistics:
         B, H, N, d = 1, 1, 2048, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
 
-        out, skip_counts = flash_attn_forward_debug(Q, K, V, causal=True)
+        out, _, skip_counts = flash_attn_forward_debug(Q, K, V, causal=True)
 
         BLOCK_M = 64
         BLOCK_N = 64
@@ -207,7 +207,7 @@ class TestEarlyExitStatistics:
         print(f"\n[Early Exit] N={N}: 跳过 {total_skipped}/{total_possible} blocks, "
               f"比例={skip_ratio:.2%}")
 
-        # 理论上 causal 跳过约 50%（上三角）
+        # 理论上 causal 跳过约 50%
         assert skip_ratio > 0.3, f"跳过比例过低: {skip_ratio:.2%}，预期 >30%"
         assert skip_ratio < 0.7, f"跳过比例过高: {skip_ratio:.2%}，预期 <70%"
 

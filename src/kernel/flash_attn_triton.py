@@ -37,15 +37,17 @@ def _get_configs_debug():
 
 
 # ============================================================
-# 主 Kernel（生产模式，带 autotune）
+# 主 Kernel
 # ============================================================
 @triton.autotune(configs=_get_configs(), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
 def _flash_attn_fwd_kernel(
     Q_ptr, K_ptr, V_ptr, Out_ptr,
+    L_ptr,
     sm_scale,
     Seqlens_k_ptr,
     stride_bh, stride_n, stride_d,
+    stride_lbh,
     N_CTX: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
@@ -138,6 +140,14 @@ def _flash_attn_fwd_kernel(
     acc = acc / safe_l[:, None]
     acc = tl.where(l_i[:, None] == 0.0, 0.0, acc)
 
+    # 存储 logsumexp: L = m + log(l)
+    l_log = tl.where(l_i == 0.0, 0.0, tl.log(l_i))
+    L_val = tl.where(m_i == float("-inf"), float("-inf"), m_i + l_log)
+    l_base = L_ptr + bh_id * stride_lbh
+    l_ptrs = l_base + offs_m
+    mask_l = offs_m < N_CTX
+    tl.store(l_ptrs, L_val, mask=mask_l)
+
     # 写出
     o_ptrs = o_base + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d
     mask_o = offs_m[:, None] < N_CTX
@@ -145,17 +155,19 @@ def _flash_attn_fwd_kernel(
 
 
 # ============================================================
-# Debug Kernel（固定配置，统计跳过的 block 数）
+# Debug Kernel
 # ============================================================
 @triton.autotune(configs=_get_configs_debug(), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
 def _flash_attn_fwd_kernel_debug(
     Q_ptr, K_ptr, V_ptr, Out_ptr,
+    L_ptr,
     sm_scale,
     Seqlens_k_ptr,
     # 统计输出：每个 program 写一个跳过计数
     Skip_count_ptr,
     stride_bh, stride_n, stride_d,
+    stride_lbh,
     N_CTX: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
@@ -242,6 +254,14 @@ def _flash_attn_fwd_kernel_debug(
     acc = acc / safe_l[:, None]
     acc = tl.where(l_i[:, None] == 0.0, 0.0, acc)
 
+    # 存储 logsumexp
+    l_log = tl.where(l_i == 0.0, 0.0, tl.log(l_i))
+    L_val = tl.where(m_i == float("-inf"), float("-inf"), m_i + l_log)
+    l_base = L_ptr + bh_id * stride_lbh
+    l_ptrs = l_base + offs_m
+    mask_l = offs_m < N_CTX
+    tl.store(l_ptrs, L_val, mask=mask_l)
+
     o_ptrs = o_base + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d
     mask_o = offs_m[:, None] < N_CTX
     tl.store(o_ptrs, acc.to(Out_ptr.dtype.element_ty), mask=mask_o)
@@ -278,6 +298,8 @@ def flash_attn_forward(
     assert Q.is_cuda, "需要 CUDA 张量"
 
     Out = torch.empty_like(Q)
+    # logsumexp 存储: [B*H, N], fp32
+    L = torch.empty(B * H, N, dtype=torch.float32, device=Q.device)
     sm_scale = 1.0 / math.sqrt(d)
 
     # reshape 为 [B*H, N, d]
@@ -297,16 +319,18 @@ def flash_attn_forward(
 
     _flash_attn_fwd_kernel[grid](
         q_flat, k_flat, v_flat, o_flat,
+        L,
         sm_scale,
         seqlens_k_expanded,
         q_flat.stride(0), q_flat.stride(1), q_flat.stride(2),
+        L.stride(0),
         N_CTX=N,
         HEAD_DIM=d,
         IS_CAUSAL=causal,
         HAS_PADDING=has_padding,
     )
 
-    return Out
+    return Out, L
 
 
 def flash_attn_forward_debug(
@@ -328,6 +352,7 @@ def flash_attn_forward_debug(
     assert Q.is_cuda
 
     Out = torch.empty_like(Q)
+    L = torch.empty(B * H, N, dtype=torch.float32, device=Q.device)
     sm_scale = 1.0 / math.sqrt(d)
 
     q_flat = Q.reshape(B * H, N, d)
@@ -350,10 +375,12 @@ def flash_attn_forward_debug(
 
     _flash_attn_fwd_kernel_debug[grid](
         q_flat, k_flat, v_flat, o_flat,
+        L,
         sm_scale,
         seqlens_k_expanded,
         skip_counts,
         q_flat.stride(0), q_flat.stride(1), q_flat.stride(2),
+        L.stride(0),
         N_CTX=N,
         HEAD_DIM=d,
         IS_CAUSAL=causal,
@@ -361,4 +388,4 @@ def flash_attn_forward_debug(
     )
 
     skip_counts = skip_counts.reshape(B * H, num_q_blocks)
-    return Out, skip_counts
+    return Out, L, skip_counts

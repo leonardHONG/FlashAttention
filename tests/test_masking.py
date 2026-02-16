@@ -31,7 +31,7 @@ class TestCausalBlockEarlyExit:
         B, H, d = 2, 4, 64
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
 
-        out = flash_attn_forward(Q, K, V, causal=True)
+        out, _ = flash_attn_forward(Q, K, V, causal=True)
         ref = sdpa_attention(Q, K, V, is_causal=True)
         _check_close(out, ref, f"causal_early_exit N={N}")
 
@@ -51,7 +51,7 @@ class TestPaddingVariousLengths:
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
         seqlens_k = torch.tensor(seqlens, dtype=torch.int32, device=DEVICE)
 
-        out = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
+        out, _ = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
 
         pad_mask = make_padding_mask(seqlens, N, device=DEVICE)
         ref = naive_attention(Q, K, V, mask=pad_mask)
@@ -67,7 +67,7 @@ class TestMixedCausalPadding:
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
         seqlens_k = torch.tensor(seqlens, dtype=torch.int32, device=DEVICE)
 
-        out = flash_attn_forward(Q, K, V, causal=True, seqlens_k=seqlens_k)
+        out, _ = flash_attn_forward(Q, K, V, causal=True, seqlens_k=seqlens_k)
 
         # 参考：Causal + Padding 合并 mask
         causal_m = make_causal_mask(N, device=DEVICE)          # [N, N]
@@ -87,7 +87,7 @@ class TestAllMaskedRows:
         Q, K, V = gen_qkv(B, H, N, d, device=DEVICE)
         seqlens_k = torch.tensor([0], dtype=torch.int32, device=DEVICE)
 
-        out = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
+        out, _ = flash_attn_forward(Q, K, V, causal=False, seqlens_k=seqlens_k)
 
         # 所有行应为 0（无有效 K）
         assert torch.allclose(out.float(), torch.zeros_like(out).float(), atol=1e-6), \
